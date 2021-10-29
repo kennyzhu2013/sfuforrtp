@@ -1,4 +1,4 @@
-package sfu
+package webrtc
 
 // rtp无绑定发送接口.
 const (
