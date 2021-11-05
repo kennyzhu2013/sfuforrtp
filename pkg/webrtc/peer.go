@@ -35,6 +35,7 @@ type PeerLocal struct {
 	publisher  *Publisher
 	subscriber *Subscriber
 
+	// change to events.
 	OnOffer                    func(*webrtc.SessionDescription)
 	OnIceCandidate             func(*webrtc.ICECandidateInit, int)
 	OnICEConnectionStateChange func(webrtc.ICEConnectionState)

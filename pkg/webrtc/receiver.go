@@ -3,12 +3,13 @@ package webrtc
 import (
 	"common/gpool"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 	"io"
-	"math/rand"
 	"mediasfu/pkg/webrtc/buffer"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Receiver defines a interface for a track receivers
@@ -24,11 +25,11 @@ type Receiver interface {
 	AddDownTrack(track *DownTrack)
 	GetBitrate() uint64
 	RetransmitPackets(track *DownTrack, packets []packetMeta) error
-	DeleteDownTrack(layer int, id string)
+	DeleteDownTrack(id string)
 	OnCloseHandler(fn func())
 	SendRTCP(p []rtcp.Packet)
 	SetRTCPCh(ch chan []rtcp.Packet)
-	GetSenderReportTime(layer int) (rtpTS uint32, ntpTS uint64)
+	GetSenderReportTime() (rtpTS uint32, ntpTS uint64)
 }
 
 // WebRTCReceiver receives a video track
@@ -65,6 +66,7 @@ type WebRTCReceiver struct {
 
 // NewWebRTCReceiver creates a new webrtc track receivers, track 用来跟踪媒体.
 func NewWebRTCReceiver(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, pid string) Receiver {
+	worker,_ := gpool.NewPool(1)
 	return &WebRTCReceiver{
 		peerID:      pid,
 		receiver:    receiver,
@@ -72,7 +74,7 @@ func NewWebRTCReceiver(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, 
 		streamID:    track.StreamID(),
 		codec:       track.Codec(),
 		kind:        track.Kind(),
-		nackWorker:  gpool.NewPool(1),
+		nackWorker:  worker,
 	}
 }
 
@@ -107,26 +109,53 @@ func (w *WebRTCReceiver) Kind() webrtc.RTPCodecType {
 
 // 有TrackLocal表示表示本地发往远端的track，对应的自然也会有TrackRemote表示远端发到本地的track：
 // 转发RTP包的核心函数.
-func (w *WebRTCReceiver) AddUpTrack(track *webrtc.TrackRemote, buff *buffer.Buffer, bestQualityFirst bool) {
+func (w *WebRTCReceiver) AddUpTrack(track *webrtc.TrackRemote, buff *buffer.Buffer) {
 	if w.closed.get() {
 		return
 	}
 
-
-
 	w.Lock()
-	w.upTracks = track // 一个上流uptrack(Publisher.).
+	w.upTracks = track // 一个上流行uptrack(Publisher.)，远端发往本地的.
 	w.buffers = buff
 	w.downTracks.Store(make([]*DownTrack, 0, 10)) // 最大十个DownTrack（其他的）
 	w.Unlock()
-
 
 	go w.writeRTP()
 }
 
 
+func (w *WebRTCReceiver) AddDownTrack(track *DownTrack) {
+	if w.closed.get() {
+		return
+	}
+
+	if w.downTrackSubscribed(track) {
+		return
+	}
+	// track.SetInitialLayers(0, 0)
+	// track.trackType = SimpleDownTrack
+	w.Lock()
+	w.storeDownTrack(track)
+	w.Unlock()
+}
+
+func (w *WebRTCReceiver) GetBitrate() uint64 {
+	return w.buffers.Bitrate()
+}
+
+func (w *WebRTCReceiver) GetMaxTemporalLayer() int32 {
+	return w.buffers.MaxTemporalLayer()
+}
+
+// OnCloseHandler method to be called on remote tracked removed
+func (w *WebRTCReceiver) OnCloseHandler(fn func()) {
+	w.onCloseHandler = fn
+}
+
 // send publish buff to all downTracks.
 // 核心函数.
+// 放音功能在原来的xmedia实现.
+// 接通后放音. Local,
 func (w *WebRTCReceiver) writeRTP() {
 	defer func() {
 		w.closeOnce.Do(func() {
@@ -135,72 +164,48 @@ func (w *WebRTCReceiver) writeRTP() {
 		})
 	}()
 
-	pli := []rtcp.Packet{
-		&rtcp.PictureLossIndication{SenderSSRC: rand.Uint32(), MediaSSRC: w.SSRC()}, // layer
-	}
-
+	// pli
+	//pli := []rtcp.Packet{
+	//	&rtcp.PictureLossIndication{SenderSSRC: rand.Uint32(), MediaSSRC: w.SSRC()}, // layer
+	//}
 	for {
 		// 兼容扩展包.
-		pkt, err := w.buffers[layer].ReadExtended()
+		// 放音如何处理.
+		pkt, err := w.buffers.ReadExtended()
 		if err == io.EOF {
 			return
 		}
 
 		// Simulcast扩展报twcc处理.
-		if w.isSimulcast {
-			if w.pending[layer].get() { //
-				if pkt.KeyFrame {
-					w.Lock()
-					for idx, dt := range w.pendingTracks[layer] {
-						w.deleteDownTrack(dt.CurrentSpatialLayer(), dt.peerID)
-						w.storeDownTrack(layer, dt)
-						dt.SwitchSpatialLayerDone(int32(layer))
-						w.pendingTracks[layer][idx] = nil
-					}
-					w.pendingTracks[layer] = w.pendingTracks[layer][:0]
-					w.pending[layer].set(false)
-					w.Unlock()
-				} else { // 当前帧不是关键帧然后发送PLI(Picture Loss Indication，关键帧请求）
-					// 发送方接收到接收方反馈的PLI或SLI需要重新让编码器生成关键帧并发送给接收端.（最好做成定时的而不是Simulcast开启情况下每次都请求发关键帧）
-					// TODO:待优化.
-					w.SendRTCP(pli) // w.SendRTCP(pli) // 发生SwitchDownTrack.
-				}
-			}
-		}
-
+		// 不主动发送pli.
 		// client subscriber.
-		for _, dt := range w.downTracks[layer].Load().([]*DownTrack) {
-			if err = dt.WriteRTP(pkt, layer); err != nil {
+		for _, dt := range w.downTracks.Load().([]*DownTrack) {
+			if err = dt.WriteRTP(pkt); err != nil {
 				if err == io.EOF && err == io.ErrClosedPipe {
 					w.Lock()
-					w.deleteDownTrack(layer, dt.id)
+					w.deleteDownTrack(dt.id)
 					w.Unlock()
 				}
-				log.Error().Err(err).Str("id", dt.id).Msg("Error writing to down track")
+				Logger.Error(err.Error() + "id" + dt.id + "Error writing to down track")
 			}
 		}
 	}
-
 }
 
 // closeTracks close all tracks from Receiver
 func (w *WebRTCReceiver) closeTracks() {
-	for idx, a := range w.available {
-		if !a.get() {
-			continue
-		}
-		for _, dt := range w.downTracks[idx].Load().([]*DownTrack) {
-			dt.Close()
-		}
+	for _, dt := range w.downTracks.Load().([]*DownTrack) {
+		dt.Close()
 	}
-	w.nackWorker.StopWait()
+
+	w.nackWorker.Release()
 	if w.onCloseHandler != nil {
 		w.onCloseHandler()
 	}
 }
 
-func (w *WebRTCReceiver) downTrackSubscribed(layer int, dt *DownTrack) bool {
-	dts := w.downTracks[layer].Load().([]*DownTrack)
+func (w *WebRTCReceiver) downTrackSubscribed(dt *DownTrack) bool {
+	dts := w.downTracks.Load().([]*DownTrack)
 	for _, cdt := range dts {
 		if cdt == dt {
 			return true
@@ -209,10 +214,94 @@ func (w *WebRTCReceiver) downTrackSubscribed(layer int, dt *DownTrack) bool {
 	return false
 }
 
-func (w *WebRTCReceiver) storeDownTrack(layer int, dt *DownTrack) {
-	dts := w.downTracks[layer].Load().([]*DownTrack)
+func (w *WebRTCReceiver) storeDownTrack(dt *DownTrack) {
+	dts := w.downTracks.Load().([]*DownTrack)
 	ndts := make([]*DownTrack, len(dts)+1)
 	copy(ndts, dts)
 	ndts[len(ndts)-1] = dt
-	w.downTracks[layer].Store(ndts)
+	w.downTracks.Store(ndts)
+}
+
+
+// DeleteDownTrack removes a DownTrack from a Receiver
+func (w *WebRTCReceiver) DeleteDownTrack(id string) {
+	if w.closed.get() {
+		return
+	}
+	w.Lock()
+	w.deleteDownTrack(id)
+	w.Unlock()
+}
+
+func (w *WebRTCReceiver) deleteDownTrack(id string) {
+	dts := w.downTracks.Load().([]*DownTrack)
+	ndts := make([]*DownTrack, 0, len(dts))
+	for _, dt := range dts {
+		if dt.id != id {
+			ndts = append(ndts, dt)
+		}
+	}
+	w.downTracks.Store(ndts)
+}
+
+func (w *WebRTCReceiver) SendRTCP(p []rtcp.Packet) {
+	if _, ok := p[0].(*rtcp.PictureLossIndication); ok {
+		if time.Now().UnixNano()-atomic.LoadInt64(&w.lastPli) < 500e6 {
+			return
+		}
+		atomic.StoreInt64(&w.lastPli, time.Now().UnixNano())
+	}
+
+	w.rtcpCh <- p
+}
+
+func (w *WebRTCReceiver) SetRTCPCh(ch chan []rtcp.Packet) {
+	w.rtcpCh = ch
+}
+
+func (w *WebRTCReceiver) GetSenderReportTime() (rtpTS uint32, ntpTS uint64) {
+	rtpTS, ntpTS, _ = w.buffers.GetSenderReportData()
+	return
+}
+
+// not need to wait done.
+func (w *WebRTCReceiver) RetransmitPackets(track *DownTrack, packets []packetMeta) error {
+	if w.nackWorker.IsClosed() {
+		return io.ErrClosedPipe
+	}
+
+	_ = w.nackWorker.Submit(func() {
+		src := packetFactory.Get().(*[]byte)
+		for _, meta := range packets {
+			pktBuff := *src
+			buff := w.buffers
+			if buff == nil {
+				break
+			}
+			i, err := buff.GetPacket(pktBuff, meta.sourceSeqNo)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				continue
+			}
+			var pkt rtp.Packet
+			if err = pkt.Unmarshal(pktBuff[:i]); err != nil {
+				continue
+			}
+			pkt.Header.SequenceNumber = meta.targetSeqNo
+			pkt.Header.Timestamp = meta.timestamp
+			pkt.Header.SSRC = track.ssrc
+			pkt.Header.PayloadType = track.payloadType
+			// simulcast ignored.
+
+			if _, err = track.writeStream.WriteRTP(&pkt.Header, pkt.Payload); err != nil {
+				Logger.Error(err, "Writing rtx packet err")
+			} else {
+				track.UpdateStats(uint32(i))
+			}
+		}
+		packetFactory.Put(src)
+	})
+	return nil
 }

@@ -1,6 +1,8 @@
 package buffer
 
 import (
+	log "common/log/newlog"
+	"common/util/mem"
 	"encoding/binary"
 	"io"
 	"strings"
@@ -8,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gammazero/deque"
-	"github.com/go-logr/logr"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
@@ -23,7 +23,7 @@ const (
 )
 
 // Logger is an implementation of logr.Logger. If is not provided - will be turned off.
-var Logger logr.Logger = logr.Discard()
+// var Logger log.Logger = log.GetLogger()
 
 type pendingPackets struct {
 	arrivalTime int64
@@ -47,7 +47,7 @@ type Buffer struct {
 	videoPool  *sync.Pool
 	audioPool  *sync.Pool
 	codecType  webrtc.RTPCodecType
-	extPackets deque.Deque
+	extPackets mem.Deque
 	pPackets   []pendingPackets
 	closeOnce  sync.Once
 	mediaSSRC  uint32
@@ -93,7 +93,7 @@ type Buffer struct {
 	feedbackTWCC func(sn uint16, timeNS int64, marker bool)
 
 	// logger
-	logger logr.Logger
+	logger log.Logger
 }
 
 type Stats struct {
@@ -111,7 +111,7 @@ type Options struct {
 }
 
 // NewBuffer constructs a new Buffer
-func NewBuffer(ssrc uint32, vp, ap *sync.Pool, logger logr.Logger) *Buffer {
+func NewBuffer(ssrc uint32, vp, ap *sync.Pool, logger log.Logger) *Buffer {
 	b := &Buffer{
 		mediaSSRC: ssrc,
 		videoPool: vp,
@@ -153,13 +153,13 @@ func (b *Buffer) Bind(params webrtc.RTPParameters, o Options) {
 		for _, fb := range codec.RTCPFeedback {
 			switch fb.Type {
 			case webrtc.TypeRTCPFBGoogREMB:
-				b.logger.V(1).Info("Setting feedback", "type", "webrtc.TypeRTCPFBGoogREMB")
+				b.logger.Info("Setting feedback", "type", "webrtc.TypeRTCPFBGoogREMB")
 				b.remb = true
 			case webrtc.TypeRTCPFBTransportCC:
-				b.logger.V(1).Info("Setting feedback", "type", webrtc.TypeRTCPFBTransportCC)
+				b.logger.Info("Setting feedback", "type", webrtc.TypeRTCPFBTransportCC)
 				b.twcc = true
 			case webrtc.TypeRTCPFBNACK:
-				b.logger.V(1).Info("Setting feedback", "type", webrtc.TypeRTCPFBNACK)
+				b.logger.Info("Setting feedback", "type", webrtc.TypeRTCPFBNACK)
 				b.nacker = newNACKQueue()
 				b.nack = true
 			}
@@ -179,7 +179,7 @@ func (b *Buffer) Bind(params webrtc.RTPParameters, o Options) {
 	b.pPackets = nil
 	b.bound = true
 
-	b.logger.V(1).Info("NewBuffer", "MaxBitRate", o.MaxBitRate)
+	b.logger.Info("NewBuffer", "MaxBitRate", o.MaxBitRate)
 }
 
 // Write adds a RTP Packet, out of order, new packet may be arrived later
@@ -444,7 +444,7 @@ func (b *Buffer) buildREMBPacket() *rtcp.ReceiverEstimatedMaximumBitrate {
 	b.stats.TotalByte = 0
 
 	return &rtcp.ReceiverEstimatedMaximumBitrate{
-		Bitrate: br,
+		Bitrate: float32(br),
 		SSRCs:   []uint32{b.mediaSSRC},
 	}
 }
@@ -529,6 +529,7 @@ func (b *Buffer) MaxTemporalLayer() int32 {
 	return atomic.LoadInt32(&b.maxTemporalLayer)
 }
 
+// twcc在视频情况下，twcc重新计算.
 func (b *Buffer) OnTransportWideCC(fn func(sn uint16, timeNS int64, marker bool)) {
 	b.feedbackTWCC = fn
 }

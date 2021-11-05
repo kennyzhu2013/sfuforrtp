@@ -1,10 +1,10 @@
 package buffer
 
 import (
+	"common/log/newlog"
 	"sync"
 	"testing"
 
-	"github.com/pion/ion-sfu/pkg/logger"
 	"github.com/pion/rtcp"
 
 	"github.com/pion/rtp"
@@ -50,9 +50,7 @@ func TestNack(t *testing.T) {
 			return &b
 		},
 	}
-	logger.SetGlobalOptions(logger.GlobalConfig{V: 1}) // 2 - TRACE
-	logger := logger.New()
-	buff := NewBuffer(123, pool, pool, logger)
+	buff := NewBuffer(123, pool, pool, log.GetLogger())
 	buff.codecType = webrtc.RTPCodecTypeVideo
 	assert.NotNil(t, buff)
 	var wg sync.WaitGroup
@@ -152,9 +150,7 @@ func TestNewBuffer(t *testing.T) {
 					return &b
 				},
 			}
-			logger.SetGlobalOptions(logger.GlobalConfig{V: 2}) // 2 - TRACE
-			logger := logger.New()
-			buff := NewBuffer(123, pool, pool, logger)
+			buff := NewBuffer(123, pool, pool, log.GetLogger())
 			buff.codecType = webrtc.RTPCodecTypeVideo
 			assert.NotNil(t, buff)
 			assert.NotNil(t, TestPackets)

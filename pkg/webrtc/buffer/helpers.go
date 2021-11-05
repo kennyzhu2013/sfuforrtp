@@ -1,6 +1,7 @@
 package buffer
 
 import (
+	log "common/log/newlog"
 	"encoding/binary"
 	"errors"
 	"sync/atomic"
@@ -188,7 +189,7 @@ func isH264Keyframe(payload []byte) bool {
 				return true
 			} else if n >= 24 {
 				// is this legal?
-				Logger.V(0).Info("Non-simple NALU within a STAP")
+				log.Info("Non-simple NALU within a STAP")
 			}
 			i += int(length)
 		}

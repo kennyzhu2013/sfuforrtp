@@ -1,6 +1,11 @@
 package webrtc
 
-import log "common/log/newlog"
+import (
+	log "common/log/newlog"
+	"github.com/pion/webrtc/v3"
+	"mediasfu/pkg/webrtc/buffer"
+	"sync"
+)
 
 // sfu 核心功能转发:只关注媒体.
 // RTP标准功能开发.
@@ -28,6 +33,16 @@ import log "common/log/newlog"
 // TODO:. 以后再实现.
 // (1) Data Channel
 // (2)
+var (
+	// Logger is an implementation of log.Logger. If is not provided - will be turned off.
+	Logger log.Logger = log.GetLogger()
+	packetFactory *sync.Pool // 使用pool
+)
 
-// Logger is an implementation of log.Logger. If is not provided - will be turned off.
-var Logger log.Logger = log.GetLogger()
+// webrtc传输配置
+type WebRTCTransportConfig struct {
+	Configuration webrtc.Configuration
+	Setting       webrtc.SettingEngine
+	Router        RouterConfig
+	BufferFactory *buffer.Factory
+}
